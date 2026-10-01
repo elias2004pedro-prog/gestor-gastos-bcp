@@ -2,16 +2,14 @@ import streamlit as st
 import requests
 import pandas as pd
 import datetime
-import plotly.graph_objects as go
 
 st.set_page_config(
-    page_title="Gestor de Gastos y Billeteras",
+    page_title="GESTOR DE GASTOS Y BILLETERAS",
     page_icon="💳",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# Conector oficial vinculado a tu Google Sheets
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx2dGYUL5di7w76sEsw5AwxgmCVs0Df0BbNKw5WgF2x4hlxIK8KVLbNIEgbfKXdnYnO/exec"
 
 CATEGORIAS = [
@@ -25,7 +23,7 @@ CUENTAS = ["BCP", "Yape", "Efectivo", "Wardaditos"]
 st.markdown("""
 <style>
     .block-container {
-        padding-top: 1rem !important;
+        padding-top: 0.8rem !important;
         padding-bottom: 4rem !important;
         padding-left: 0.6rem !important;
         padding-right: 0.6rem !important;
@@ -41,7 +39,7 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
     .total-title {
-        font-size: 0.75rem;
+        font-size: 0.72rem;
         text-transform: uppercase;
         letter-spacing: 1px;
         color: #90CDF4;
@@ -66,37 +64,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if "saldos_base" not in st.session_state:
-    st.session_state["saldos_base"] = {
-        "BCP": 1250.00,
-        "Yape": 340.50,
-        "Efectivo": 180.00,
-        "Wardaditos": 500.00
-    }
-
-@st.cache_data(ttl=10)
-def obtener_movimientos():
+# 1. OBTENCIÓN ROBUSTA DE DATOS DESDE SHEETS
+@st.cache_data(ttl=5)
+def cargar_datos_sheets():
     try:
-        r = requests.get(APPS_SCRIPT_URL, timeout=8)
+        r = requests.get(APPS_SCRIPT_URL, timeout=10)
         if r.status_code == 200:
-            return r.json().get("movimientos", [])
+            res = r.json()
+            return res.get("movimientos", []), res.get("saldosBase", {c: 0.0 for c in CUENTAS})
     except Exception as e:
-        st.error(f"Error al sincronizar con Google Sheets: {e}")
-    return []
+        st.error(f"Error al conectar con Google Sheets: {e}")
+    return [], {"BCP": 1250.0, "Yape": 340.5, "Efectivo": 180.0, "Wardaditos": 500.0}
 
-movimientos = obtener_movimientos()
+movimientos, saldos_base = cargar_datos_sheets()
 
-# Cálculo dinámico de saldos actuales sumando/restando movimientos
-saldos_actuales = dict(st.session_state["saldos_base"])
+# 2. CÁLCULO DINÁMICO DE SALDOS DE BILLETERAS
+saldos_actuales = dict(saldos_base)
 for m in movimientos:
     monto = float(m.get("monto", 0))
-    cuenta = m.get("cuenta")
+    cta = m.get("cuenta")
     tipo = m.get("tipo")
-    if cuenta in saldos_actuales:
+    if cta in saldos_actuales:
         if tipo in ["Gasto", "Transferencia Salida"]:
-            saldos_actuales[cuenta] -= monto
+            saldos_actuales[cta] -= monto
         elif tipo in ["Ingreso", "Transferencia Entrada"]:
-            saldos_actuales[cuenta] += monto
+            saldos_actuales[cta] += monto
 
 total_general = sum(saldos_actuales.values())
 
@@ -111,74 +103,102 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 2: FORMULARIO PRINCIPAL REGISTRAR GASTO
+# ELEMENTO 2: ACCIÓN INMEDIATA (GASTO / INGRESO)
 # ==========================================
-with st.expander("➕ REGISTRAR GASTO", expanded=True):
+tab_gasto, tab_ingreso = st.tabs(["➕ REGISTRAR GASTO", "💵 REGISTRAR INGRESO"])
+
+with tab_gasto:
     with st.form("form_gasto", clear_on_submit=True):
         col_m, col_cta = st.columns(2)
         with col_m:
-            monto = st.number_input("Monto (S/.)", min_value=0.10, step=1.0, format="%.2f")
+            monto_g = st.number_input("Monto Gasto (S/.)", min_value=0.10, step=1.0, format="%.2f")
         with col_cta:
-            cuenta = st.selectbox("Cuenta de Salida", options=CUENTAS, index=1) # Yape por defecto
+            cuenta_g = st.selectbox("Cuenta de Salida", options=CUENTAS, index=1)
 
-        descripcion = st.text_input("Descripción / Concepto", placeholder="¿En qué se gastó?")
-        categoria = st.selectbox("Categoría", options=CATEGORIAS, index=6) # Comidas por defecto
+        desc_g = st.text_input("Descripción", placeholder="¿En qué se gastó?")
+        cat_g = st.selectbox("Categoría", options=CATEGORIAS, index=6)
 
         col_f, col_h = st.columns(2)
         with col_f:
-            fecha_reg = st.date_input("Fecha", datetime.date.today())
+            f_g = st.date_input("Fecha", datetime.date.today(), key="f_gasto")
         with col_h:
-            hora_reg = st.time_input("Hora", datetime.datetime.now().time())
+            h_g = st.time_input("Hora", datetime.datetime.now().time(), key="h_gasto")
 
         btn_gasto = st.form_submit_button("💳 Registrar Gasto", use_container_width=True)
 
         if btn_gasto:
-            fecha_completa = f"{fecha_reg.strftime('%Y-%m-%d')} {hora_reg.strftime('%H:%M:%S')}"
+            f_str = f"{f_g.strftime('%Y-%m-%d')} {h_g.strftime('%H:%M:%S')}"
             payload = {
                 "accion": "REGISTRAR_GASTO",
-                "fechaHora": fecha_completa,
-                "cuenta": cuenta,
-                "categoria": categoria,
-                "descripcion": descripcion if descripcion else categoria,
-                "monto": monto
+                "fechaHora": f_str,
+                "cuenta": cuenta_g,
+                "categoria": cat_g,
+                "descripcion": desc_g if desc_g else cat_g,
+                "monto": monto_g
             }
-            try:
-                res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
-                if res.status_code == 200:
-                    st.cache_data.clear()
-                    st.success("¡Gasto guardado en Google Sheets con éxito!")
-                    st.rerun()
-                else:
-                    st.error("No se pudo registrar en la hoja.")
-            except Exception as e:
-                st.error(f"Error al enviar datos: {e}")
+            requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+            st.cache_data.clear()
+            st.success("¡Gasto registrado con éxito!")
+            st.rerun()
+
+with tab_ingreso:
+    with st.form("form_ingreso", clear_on_submit=True):
+        col_mi, col_ctai = st.columns(2)
+        with col_mi:
+            monto_i = st.number_input("Monto Ingreso (S/.)", min_value=0.10, step=1.0, format="%.2f")
+        with col_ctai:
+            cuenta_i = st.selectbox("Cuenta de Entrada", options=CUENTAS, index=0)
+
+        desc_i = st.text_input("Concepto de Ingreso", placeholder="Sueldo, abono, venta, etc.")
+
+        col_fi, col_hi = st.columns(2)
+        with col_fi:
+            f_i = st.date_input("Fecha", datetime.date.today(), key="f_ingreso")
+        with col_hi:
+            h_i = st.time_input("Hora", datetime.datetime.now().time(), key="h_ingreso")
+
+        btn_ingreso = st.form_submit_button("💰 Abonar Ingreso", use_container_width=True)
+
+        if btn_ingreso:
+            f_str_i = f"{f_i.strftime('%Y-%m-%d')} {h_i.strftime('%H:%M:%S')}"
+            payload = {
+                "accion": "REGISTRAR_INGRESO",
+                "fechaHora": f_str_i,
+                "cuenta": cuenta_i,
+                "categoria": "Ingreso",
+                "descripcion": desc_i if desc_i else "Abono directo",
+                "monto": monto_i
+            }
+            requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+            st.cache_data.clear()
+            st.success("¡Ingreso abonado con éxito!")
+            st.rerun()
 
 # ==========================================
-# ELEMENTO 3: MÉTRICAS DEL DÍA (00:00 a 24:00)
+# ELEMENTO 3: CONTROL DE GASTOS DIARIOS (00:00 A 24:00)
 # ==========================================
-col_sel_dia, _ = st.columns([1, 1])
-with col_sel_dia:
-    dia_consulta = st.date_input("📅 Ver fecha:", datetime.date.today(), key="filtro_dia")
+col_cal, _ = st.columns([1, 1])
+with col_cal:
+    dia_sel = st.date_input("📅 Ver fecha del calendario:", datetime.date.today(), key="dia_calendario")
 
-# Regla de cálculo estricta: Gastos del día calendario seleccionado (00:00:00 a 23:59:59)
+dia_sel_str = dia_sel.strftime("%Y-%m-%d")
+
+# Sumatoria estricta 00:00 a 24:00 para la fecha seleccionada
 gasto_dia_acumulado = 0.0
 for m in movimientos:
     if m.get("tipo") == "Gasto":
-        f_str = str(m.get("fechaHora", ""))
-        try:
-            f_fecha = datetime.datetime.strptime(f_str[:10], "%Y-%m-%d").date()
-            if f_fecha == dia_consulta:
-                gasto_dia_acumulado += float(m.get("monto", 0))
-        except:
-            pass
+        fh_raw = str(m.get("fechaHora", ""))[:10]
+        # Soporta formatos YYYY-MM-DD o DD/MM/YYYY
+        if dia_sel_str == fh_raw or dia_sel.strftime("%d/%m/%Y") == fh_raw:
+            gasto_dia_acumulado += float(m.get("monto", 0))
 
-texto_dia = "Hoy has gastado" if dia_consulta == datetime.date.today() else f"Gasto del {dia_consulta.strftime('%d/%m/%Y')}"
+txt_dia = "HOY HAS GASTADO" if dia_sel == datetime.date.today() else f"GASTO DEL {dia_sel.strftime('%d/%m/%Y')}"
 
 st.markdown(f"""
 <div class="metric-hoy">
     <div>
-        <div style="font-size:0.75rem; font-weight:700; color:#C2410C; text-transform:uppercase;">{texto_dia}</div>
-        <div style="font-size:1.6rem; font-weight:800; color:#7C2D12;">S/. {gasto_dia_acumulado:,.2f}</div>
+        <div style="font-size:0.75rem; font-weight:700; color:#C2410C;">{txt_dia}</div>
+        <div style="font-size:1.7rem; font-weight:800; color:#7C2D12;">S/. {gasto_dia_acumulado:,.2f}</div>
         <div style="font-size:0.68rem; color:#9A3412;">00:00:00 a 23:59:59 hrs</div>
     </div>
     <div style="font-size:1.8rem;">📉</div>
@@ -186,13 +206,13 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 4: BILLETERAS COMPACTAS Y TRANSFERENCIA
+# ELEMENTO 4: BILLETERAS, EDICIÓN Y TRANSFERENCIAS
 # ==========================================
-col_header_w, col_btn_tr = st.columns([2, 1])
-with col_header_w:
+col_w_title, col_w_btn = st.columns([2, 1])
+with col_w_title:
     st.markdown("**Billeteras**")
-with col_btn_tr:
-    abrir_tr = st.button("🔄 Transferir", use_container_width=True)
+with col_w_btn:
+    abrir_modal = st.button("🔄 Transferir", use_container_width=True)
 
 b1, b2 = st.columns(2)
 with b1:
@@ -202,47 +222,60 @@ with b2:
     st.metric("Yape", f"S/. {saldos_actuales['Yape']:,.2f}")
     st.metric("Wardaditos", f"S/. {saldos_actuales['Wardaditos']:,.2f}")
 
-if abrir_tr:
-    with st.form("form_transferencia"):
+# MÓDULO DE TRANSFERENCIA
+if abrir_modal:
+    with st.form("form_transf_modal"):
         st.subheader("Mover / Transferir Saldo")
-        c_orig = st.selectbox("Billetera Origen", options=CUENTAS, index=0)
-        c_dest = st.selectbox("Billetera Destino", options=CUENTAS, index=1)
-        m_transf = st.number_input("Monto a Mover (S/.)", min_value=0.10, step=1.0, format="%.2f")
-        nota_transf = st.text_input("Nota / Concepto (opcional)", placeholder="Pase para compras")
+        orig = st.selectbox("Billetera Origen", CUENTAS, index=0)
+        dest = st.selectbox("Billetera Destino", CUENTAS, index=1)
+        m_tr = st.number_input("Monto a Mover (S/.)", min_value=0.10, step=1.0, format="%.2f")
+        nota_tr = st.text_input("Nota / Concepto (opcional)")
         
-        btn_confirmar_tr = st.form_submit_button("Confirmar Transferencia", use_container_width=True)
+        btn_ejecutar_tr = st.form_submit_button("Confirmar Transferencia", use_container_width=True)
 
-        if btn_confirmar_tr:
-            if c_orig == c_dest:
+        if btn_ejecutar_tr:
+            if orig == dest:
                 st.error("Origen y destino no pueden ser iguales.")
-            elif m_transf > saldos_actuales[c_orig]:
-                st.error(f"Saldo insuficiente en {c_orig} (Disponible: S/. {saldos_actuales[c_orig]:,.2f})")
+            elif m_tr > saldos_actuales[orig]:
+                st.error(f"Saldo insuficiente en {orig} (Disp: S/. {saldos_actuales[orig]:,.2f})")
             else:
                 payload_tr = {
                     "accion": "TRANSFERENCIA",
                     "fechaHora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "cuentaOrigen": c_orig,
-                    "cuentaDestino": c_dest,
-                    "monto": m_transf,
-                    "nota": nota_transf
+                    "cuentaOrigen": orig,
+                    "cuentaDestino": dest,
+                    "monto": m_tr,
+                    "nota": nota_tr
                 }
-                try:
-                    res = requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
-                    if res.status_code == 200:
-                        st.cache_data.clear()
-                        st.success("¡Transferencia registrada en Sheets!")
-                        st.rerun()
-                    else:
-                        st.error("No se pudo registrar la transferencia.")
-                except Exception as e:
-                    st.error(f"Error al transferir: {e}")
+                requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
+                st.cache_data.clear()
+                st.success("¡Transferencia completada!")
+                st.rerun()
+
+# MÓDULO PARA EDITAR SALDOS BASE MANUALMENTE
+with st.expander("✏️ Editar Saldo Base de Billeteras"):
+    with st.form("form_editar_saldos"):
+        cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
+        nuevo_saldo = st.number_input("Nuevo saldo inicial base (S/.)", min_value=0.0, step=10.0, format="%.2f")
+        btn_guardar_saldo = st.form_submit_button("Actualizar Saldo en Sheets")
+        
+        if btn_guardar_saldo:
+            payload_ed = {
+                "accion": "EDITAR_SALDO_BASE",
+                "cuenta": cta_edit,
+                "nuevoSaldo": nuevo_saldo
+            }
+            requests.post(APPS_SCRIPT_URL, json=payload_ed, timeout=8)
+            st.cache_data.clear()
+            st.success(f"Saldo base de {cta_edit} actualizado a S/. {nuevo_saldo:,.2f}")
+            st.rerun()
 
 # ==========================================
-# RESUMEN DE MOVIMIENTOS RECIENTES
+# HISTORIAL COMPLETO
 # ==========================================
-with st.expander("📋 Ver Últimos Movimientos"):
+with st.expander("📋 Historial de Movimientos"):
     if movimientos:
-        df_movs = pd.DataFrame(movimientos)
-        st.dataframe(df_movs.tail(15).iloc[::-1], use_container_width=True, hide_index=True)
+        df_hist = pd.DataFrame(movimientos)
+        st.dataframe(df_hist.iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.caption("No hay movimientos registrados todavía.")
+        st.caption("No hay movimientos registrados.")
