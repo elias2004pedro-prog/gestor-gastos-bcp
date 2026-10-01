@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import datetime
+import time
 
 st.set_page_config(
     page_title="GESTOR DE GASTOS Y BILLETERAS",
@@ -64,21 +65,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. OBTENCIÓN ROBUSTA DE DATOS DESDE SHEETS
-@st.cache_data(ttl=5)
+# 1. OBTENCIÓN EN TIEMPO REAL SIN CACHÉ CONGELADO
 def cargar_datos_sheets():
     try:
-        r = requests.get(APPS_SCRIPT_URL, timeout=10)
+        # Parámetro anti-caché con timestamp
+        url_fresca = f"{APPS_SCRIPT_URL}?t={int(time.time())}"
+        r = requests.get(url_fresca, timeout=8)
         if r.status_code == 200:
             res = r.json()
             return res.get("movimientos", []), res.get("saldosBase", {c: 0.0 for c in CUENTAS})
     except Exception as e:
-        st.error(f"Error al conectar con Google Sheets: {e}")
+        st.error(f"Error de conexión con Sheets: {e}")
     return [], {"BCP": 1250.0, "Yape": 340.5, "Efectivo": 180.0, "Wardaditos": 500.0}
 
 movimientos, saldos_base = cargar_datos_sheets()
 
-# 2. CÁLCULO DINÁMICO DE SALDOS DE BILLETERAS
+# 2. CÁLCULO DE SALDOS ACTUALES
 saldos_actuales = dict(saldos_base)
 for m in movimientos:
     monto = float(m.get("monto", 0))
@@ -103,7 +105,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 2: ACCIÓN INMEDIATA (GASTO / INGRESO)
+# ELEMENTO 2: FORMULARIO PRINCIPAL
 # ==========================================
 tab_gasto, tab_ingreso = st.tabs(["➕ REGISTRAR GASTO", "💵 REGISTRAR INGRESO"])
 
@@ -136,9 +138,9 @@ with tab_gasto:
                 "descripcion": desc_g if desc_g else cat_g,
                 "monto": monto_g
             }
-            requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
-            st.cache_data.clear()
-            st.success("¡Gasto registrado con éxito!")
+            with st.spinner("Guardando en Sheets..."):
+                requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+                time.sleep(1) # Tiempo de sincronización para que Sheets asiente la fila
             st.rerun()
 
 with tab_ingreso:
@@ -169,37 +171,54 @@ with tab_ingreso:
                 "descripcion": desc_i if desc_i else "Abono directo",
                 "monto": monto_i
             }
-            requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
-            st.cache_data.clear()
-            st.success("¡Ingreso abonado con éxito!")
+            with st.spinner("Abonando en Sheets..."):
+                requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+                time.sleep(1)
             st.rerun()
 
 # ==========================================
-# ELEMENTO 3: CONTROL DE GASTOS DIARIOS (00:00 A 24:00)
+# ELEMENTO 3: GASTO ACUMULADO HASTA EL MOMENTO (HOY)
 # ==========================================
-col_cal, _ = st.columns([1, 1])
-with col_cal:
-    dia_sel = st.date_input("📅 Ver fecha del calendario:", datetime.date.today(), key="dia_calendario")
+def parsear_fecha_flexible(val_str):
+    """Interpreta cualquier formato de fecha que exporte Google Sheets."""
+    s = str(val_str).strip()
+    if not s or s.upper() in ["NONE", "NAN"]:
+        return None
+    s = s.replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(s[:len(fmt)], fmt).date()
+        except:
+            pass
+    # Intento de extracción por componentes
+    partes = s[:10].replace("-", "/").split("/")
+    if len(partes) == 3:
+        try:
+            if len(partes[0]) == 4:
+                return datetime.date(int(partes[0]), int(partes[1]), int(partes[2]))
+            elif len(partes[2]) == 4:
+                return datetime.date(int(partes[2]), int(partes[1]), int(partes[0]))
+        except:
+            pass
+    return None
 
-dia_sel_str = dia_sel.strftime("%Y-%m-%d")
+hoy = datetime.date.today()
+ahora_hora = datetime.datetime.now().strftime("%H:%M")
 
-# Sumatoria estricta 00:00 a 24:00 para la fecha seleccionada
-gasto_dia_acumulado = 0.0
+# Sumatoria estricta de todos los gastos registrados correspondientes al día de hoy
+gasto_hoy_acumulado = 0.0
 for m in movimientos:
-    if m.get("tipo") == "Gasto":
-        fh_raw = str(m.get("fechaHora", ""))[:10]
-        # Soporta formatos YYYY-MM-DD o DD/MM/YYYY
-        if dia_sel_str == fh_raw or dia_sel.strftime("%d/%m/%Y") == fh_raw:
-            gasto_dia_acumulado += float(m.get("monto", 0))
-
-txt_dia = "HOY HAS GASTADO" if dia_sel == datetime.date.today() else f"GASTO DEL {dia_sel.strftime('%d/%m/%Y')}"
+    if str(m.get("tipo", "")).strip().lower() == "gasto":
+        f_mov = parsear_fecha_flexible(m.get("fechaHora"))
+        if f_mov == hoy:
+            gasto_hoy_acumulado += float(m.get("monto", 0))
 
 st.markdown(f"""
 <div class="metric-hoy">
     <div>
-        <div style="font-size:0.75rem; font-weight:700; color:#C2410C;">{txt_dia}</div>
-        <div style="font-size:1.7rem; font-weight:800; color:#7C2D12;">S/. {gasto_dia_acumulado:,.2f}</div>
-        <div style="font-size:0.68rem; color:#9A3412;">00:00:00 a 23:59:59 hrs</div>
+        <div style="font-size:0.75rem; font-weight:700; color:#C2410C;">HOY HAS GASTADO</div>
+        <div style="font-size:1.75rem; font-weight:800; color:#7C2D12;">S/. {gasto_hoy_acumulado:,.2f}</div>
+        <div style="font-size:0.68rem; color:#9A3412;">Gasto acumulado hasta el momento ({ahora_hora} hrs)</div>
     </div>
     <div style="font-size:1.8rem;">📉</div>
 </div>
@@ -222,7 +241,6 @@ with b2:
     st.metric("Yape", f"S/. {saldos_actuales['Yape']:,.2f}")
     st.metric("Wardaditos", f"S/. {saldos_actuales['Wardaditos']:,.2f}")
 
-# MÓDULO DE TRANSFERENCIA
 if abrir_modal:
     with st.form("form_transf_modal"):
         st.subheader("Mover / Transferir Saldo")
@@ -247,12 +265,11 @@ if abrir_modal:
                     "monto": m_tr,
                     "nota": nota_tr
                 }
-                requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
-                st.cache_data.clear()
-                st.success("¡Transferencia completada!")
+                with st.spinner("Procesando transferencia..."):
+                    requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
+                    time.sleep(1)
                 st.rerun()
 
-# MÓDULO PARA EDITAR SALDOS BASE MANUALMENTE
 with st.expander("✏️ Editar Saldo Base de Billeteras"):
     with st.form("form_editar_saldos"):
         cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
@@ -265,9 +282,9 @@ with st.expander("✏️ Editar Saldo Base de Billeteras"):
                 "cuenta": cta_edit,
                 "nuevoSaldo": nuevo_saldo
             }
-            requests.post(APPS_SCRIPT_URL, json=payload_ed, timeout=8)
-            st.cache_data.clear()
-            st.success(f"Saldo base de {cta_edit} actualizado a S/. {nuevo_saldo:,.2f}")
+            with st.spinner("Actualizando saldo base..."):
+                requests.post(APPS_SCRIPT_URL, json=payload_ed, timeout=8)
+                time.sleep(1)
             st.rerun()
 
 # ==========================================
