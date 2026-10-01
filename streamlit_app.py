@@ -11,8 +11,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Sustituye esta URL luego por la de tu Google Apps Script si deseas conexión en la nube
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/TU_SCRIPT_ID_AQUI/exec"
+# Conector oficial vinculado a tu Google Sheets
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx2dGYUL5di7w76sEsw5AwxgmCVs0Df0BbNKw5WgF2x4hlxIK8KVLbNIEgbfKXdnYnO/exec"
 
 CATEGORIAS = [
     "Salidas CH", "Fiestas", "Salidas familiares", 
@@ -74,25 +74,19 @@ if "saldos_base" not in st.session_state:
         "Wardaditos": 500.00
     }
 
-if "movimientos_locales" not in st.session_state:
-    st.session_state["movimientos_locales"] = [
-        {"fechaHora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "tipo": "Gasto", "cuenta": "Yape", "categoria": "Comidas", "descripcion": "Menú", "monto": 18.0}
-    ]
-
 @st.cache_data(ttl=10)
 def obtener_movimientos():
-    if "TU_SCRIPT_ID" in APPS_SCRIPT_URL:
-        return st.session_state["movimientos_locales"]
     try:
         r = requests.get(APPS_SCRIPT_URL, timeout=8)
         if r.status_code == 200:
             return r.json().get("movimientos", [])
-    except:
-        pass
-    return st.session_state["movimientos_locales"]
+    except Exception as e:
+        st.error(f"Error al sincronizar con Google Sheets: {e}")
+    return []
 
 movimientos = obtener_movimientos()
 
+# Cálculo dinámico de saldos actuales sumando/restando movimientos
 saldos_actuales = dict(st.session_state["saldos_base"])
 for m in movimientos:
     monto = float(m.get("monto", 0))
@@ -106,6 +100,9 @@ for m in movimientos:
 
 total_general = sum(saldos_actuales.values())
 
+# ==========================================
+# ELEMENTO 1: ENCABEZADO SUPERIOR
+# ==========================================
 st.markdown(f"""
 <div class="total-banner">
     <p class="total-title">Total General Disponible</p>
@@ -113,16 +110,19 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# ELEMENTO 2: FORMULARIO PRINCIPAL REGISTRAR GASTO
+# ==========================================
 with st.expander("➕ REGISTRAR GASTO", expanded=True):
     with st.form("form_gasto", clear_on_submit=True):
         col_m, col_cta = st.columns(2)
         with col_m:
             monto = st.number_input("Monto (S/.)", min_value=0.10, step=1.0, format="%.2f")
         with col_cta:
-            cuenta = st.selectbox("Cuenta de Salida", options=CUENTAS, index=1)
+            cuenta = st.selectbox("Cuenta de Salida", options=CUENTAS, index=1) # Yape por defecto
 
         descripcion = st.text_input("Descripción / Concepto", placeholder="¿En qué se gastó?")
-        categoria = st.selectbox("Categoría", options=CATEGORIAS, index=6)
+        categoria = st.selectbox("Categoría", options=CATEGORIAS, index=6) # Comidas por defecto
 
         col_f, col_h = st.columns(2)
         with col_f:
@@ -142,21 +142,25 @@ with st.expander("➕ REGISTRAR GASTO", expanded=True):
                 "descripcion": descripcion if descripcion else categoria,
                 "monto": monto
             }
-            if "TU_SCRIPT_ID" not in APPS_SCRIPT_URL:
-                try:
-                    requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
-                except Exception as e:
-                    st.error(f"Error al conectar con Sheets: {e}")
-            else:
-                st.session_state["movimientos_locales"].append(payload)
-            st.cache_data.clear()
-            st.success("¡Gasto registrado correctamente!")
-            st.rerun()
+            try:
+                res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+                if res.status_code == 200:
+                    st.cache_data.clear()
+                    st.success("¡Gasto guardado en Google Sheets con éxito!")
+                    st.rerun()
+                else:
+                    st.error("No se pudo registrar en la hoja.")
+            except Exception as e:
+                st.error(f"Error al enviar datos: {e}")
 
+# ==========================================
+# ELEMENTO 3: MÉTRICAS DEL DÍA (00:00 a 24:00)
+# ==========================================
 col_sel_dia, _ = st.columns([1, 1])
 with col_sel_dia:
     dia_consulta = st.date_input("📅 Ver fecha:", datetime.date.today(), key="filtro_dia")
 
+# Regla de cálculo estricta: Gastos del día calendario seleccionado (00:00:00 a 23:59:59)
 gasto_dia_acumulado = 0.0
 for m in movimientos:
     if m.get("tipo") == "Gasto":
@@ -181,6 +185,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# ELEMENTO 4: BILLETERAS COMPACTAS Y TRANSFERENCIA
+# ==========================================
 col_header_w, col_btn_tr = st.columns([2, 1])
 with col_header_w:
     st.markdown("**Billeteras**")
@@ -209,7 +216,7 @@ if abrir_tr:
             if c_orig == c_dest:
                 st.error("Origen y destino no pueden ser iguales.")
             elif m_transf > saldos_actuales[c_orig]:
-                st.error(f"Saldo insuficiente en {c_orig}")
+                st.error(f"Saldo insuficiente en {c_orig} (Disponible: S/. {saldos_actuales[c_orig]:,.2f})")
             else:
                 payload_tr = {
                     "accion": "TRANSFERENCIA",
@@ -219,21 +226,23 @@ if abrir_tr:
                     "monto": m_transf,
                     "nota": nota_transf
                 }
-                if "TU_SCRIPT_ID" not in APPS_SCRIPT_URL:
-                    try:
-                        requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
-                    except Exception as e:
-                        st.error(f"Error al registrar en Sheets: {e}")
-                else:
-                    st.session_state["movimientos_locales"].append({"tipo": "Transferencia Salida", "cuenta": c_orig, "monto": m_transf})
-                    st.session_state["movimientos_locales"].append({"tipo": "Transferencia Entrada", "cuenta": c_dest, "monto": m_transf})
-                st.cache_data.clear()
-                st.success("¡Transferencia realizada!")
-                st.rerun()
+                try:
+                    res = requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
+                    if res.status_code == 200:
+                        st.cache_data.clear()
+                        st.success("¡Transferencia registrada en Sheets!")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo registrar la transferencia.")
+                except Exception as e:
+                    st.error(f"Error al transferir: {e}")
 
+# ==========================================
+# RESUMEN DE MOVIMIENTOS RECIENTES
+# ==========================================
 with st.expander("📋 Ver Últimos Movimientos"):
     if movimientos:
         df_movs = pd.DataFrame(movimientos)
         st.dataframe(df_movs.tail(15).iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.caption("No hay movimientos registrados.")
+        st.caption("No hay movimientos registrados todavía.")
