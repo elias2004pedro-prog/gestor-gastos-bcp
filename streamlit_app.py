@@ -89,8 +89,8 @@ movimientos, saldos_base, gasto_hoy_servidor = cargar_datos_sheets()
 if "saldos_override" not in st.session_state:
     st.session_state["saldos_override"] = {}
 
-# 2. CÁLCULO DE SALDOS EN VIVO (CON CONTABILIZACIÓN ROBUSTA DE TRANSFERENCIAS)
-saldos_actuales = dict(saldos_base)
+# 2. CÁLCULO DE SALDOS EN VIVO
+saldos_actuales = {c: 0.0 for c in CUENTAS}
 
 for c in CUENTAS:
     if c in st.session_state["saldos_override"]:
@@ -102,9 +102,9 @@ for c in CUENTAS:
             if cta == c:
                 monto = float(m.get("monto", 0))
                 tipo = str(m.get("tipo", "")).strip().lower()
-                if "gasto" in tipo or "transferencia salida" in tipo or "salida" in tipo:
+                if "gasto" in tipo or "salida" in tipo:
                     delta -= monto
-                elif "ingreso" in tipo or "transferencia entrada" in tipo or "entrada" in tipo:
+                elif "ingreso" in tipo or "entrada" in tipo:
                     delta += monto
         saldos_actuales[c] = saldos_base.get(c, 0.0) + delta
 
@@ -121,7 +121,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 2: FORMULARIO PRINCIPAL
+# ELEMENTO 2: FORMULARIO PRINCIPAL (SIN SELECTORES DE FECHA/HORA)
 # ==========================================
 tab_gasto, tab_ingreso = st.tabs(["➕ REGISTRAR GASTO", "💵 REGISTRAR INGRESO"])
 
@@ -138,16 +138,11 @@ with tab_gasto:
         desc_g = st.text_input("Descripción", placeholder="¿En qué se gastó?")
         cat_g = st.selectbox("Categoría", options=CATEGORIAS, index=6)
 
-        col_f, col_h = st.columns(2)
-        with col_f:
-            f_g = st.date_input("Fecha", ahora_peru.date(), key="f_gasto")
-        with col_h:
-            h_g = st.time_input("Hora", ahora_peru.time(), key="h_gasto")
-
         btn_gasto = st.form_submit_button("💳 Registrar Gasto", use_container_width=True)
 
         if btn_gasto:
-            f_str = f"{f_g.strftime('%Y-%m-%d')} {h_g.strftime('%H:%M:%S')}"
+            # Captura automática de fecha y hora local de Perú para Google Sheets
+            f_str = datetime.datetime.now(TZ_PERU).strftime("%Y-%m-%d %H:%M:%S")
             payload = {
                 "accion": "REGISTRAR_GASTO",
                 "fechaHora": f_str,
@@ -156,7 +151,6 @@ with tab_gasto:
                 "descripcion": desc_g if desc_g else cat_g,
                 "monto": monto_g
             }
-            # Restar de inmediato en la sesión visual
             saldos_actuales[cuenta_g] -= monto_g
             st.session_state["saldos_override"][cuenta_g] = saldos_actuales[cuenta_g]
             
@@ -175,16 +169,11 @@ with tab_ingreso:
 
         desc_i = st.text_input("Concepto de Ingreso", placeholder="Sueldo, abono, etc.")
 
-        col_fi, col_hi = st.columns(2)
-        with col_fi:
-            f_i = st.date_input("Fecha", ahora_peru.date(), key="f_ingreso")
-        with col_hi:
-            h_i = st.time_input("Hora", ahora_peru.time(), key="h_ingreso")
-
         btn_ingreso = st.form_submit_button("💰 Abonar Ingreso", use_container_width=True)
 
         if btn_ingreso:
-            f_str_i = f"{f_i.strftime('%Y-%m-%d')} {h_i.strftime('%H:%M:%S')}"
+            # Captura automática de fecha y hora local de Perú para Google Sheets
+            f_str_i = datetime.datetime.now(TZ_PERU).strftime("%Y-%m-%d %H:%M:%S")
             payload = {
                 "accion": "REGISTRAR_INGRESO",
                 "fechaHora": f_str_i,
@@ -230,7 +219,7 @@ with b2:
     st.metric("Yape", f"S/. {saldos_actuales['Yape']:,.2f}")
     st.metric("Wardaditos", f"S/. {saldos_actuales['Wardaditos']:,.2f}")
 
-# MÓDULO INTERACTIVO DE TRANSFERENCIA (ACCESIBLE Y PERSISTENTE)
+# MÓDULO INTERACTIVO DE TRANSFERENCIA
 with st.expander("🔄 Mover / Transferir Saldo entre Billeteras"):
     with st.form("form_transf_modal", clear_on_submit=True):
         col_orig, col_dest = st.columns(2)
@@ -250,16 +239,14 @@ with st.expander("🔄 Mover / Transferir Saldo entre Billeteras"):
             elif m_tr > saldos_actuales[orig]:
                 st.error(f"Saldo insuficiente en {orig} (Disponible: S/. {saldos_actuales[orig]:,.2f})")
             else:
-                # 1. Ajustar saldos inmediatamente en la pantalla
                 saldos_actuales[orig] -= m_tr
                 saldos_actuales[dest] += m_tr
                 st.session_state["saldos_override"][orig] = saldos_actuales[orig]
                 st.session_state["saldos_override"][dest] = saldos_actuales[dest]
 
-                # 2. Registrar en Google Sheets
                 payload_tr = {
                     "accion": "TRANSFERENCIA",
-                    "fechaHora": ahora_peru.strftime("%Y-%m-%d %H:%M:%S"),
+                    "fechaHora": datetime.datetime.now(TZ_PERU).strftime("%Y-%m-%d %H:%M:%S"),
                     "cuentaOrigen": orig,
                     "cuentaDestino": dest,
                     "monto": m_tr,
