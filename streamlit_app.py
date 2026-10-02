@@ -68,7 +68,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. CARGA DIRECTA Y LECTURA DEL TOTAL DE HOY
+# 1. CARGA DIRECTA DESDE GOOGLE SHEETS
 def cargar_datos_sheets():
     try:
         url_fresca = f"{APPS_SCRIPT_URL}?t={int(time.time() * 1000)}"
@@ -89,7 +89,7 @@ movimientos, saldos_base, gasto_hoy_servidor = cargar_datos_sheets()
 if "saldos_override" not in st.session_state:
     st.session_state["saldos_override"] = {}
 
-# 2. CÁLCULO DE SALDOS EN VIVO
+# 2. CÁLCULO DE SALDOS EN VIVO (CON CONTABILIZACIÓN ROBUSTA DE TRANSFERENCIAS)
 saldos_actuales = dict(saldos_base)
 
 for c in CUENTAS:
@@ -101,10 +101,10 @@ for c in CUENTAS:
             cta = str(m.get("cuenta", "")).strip()
             if cta == c:
                 monto = float(m.get("monto", 0))
-                tipo = str(m.get("tipo", "")).strip()
-                if tipo in ["Gasto", "Transferencia Salida"]:
+                tipo = str(m.get("tipo", "")).strip().lower()
+                if "gasto" in tipo or "transferencia salida" in tipo or "salida" in tipo:
                     delta -= monto
-                elif tipo in ["Ingreso", "Transferencia Entrada"]:
+                elif "ingreso" in tipo or "transferencia entrada" in tipo or "entrada" in tipo:
                     delta += monto
         saldos_actuales[c] = saldos_base.get(c, 0.0) + delta
 
@@ -156,7 +156,10 @@ with tab_gasto:
                 "descripcion": desc_g if desc_g else cat_g,
                 "monto": monto_g
             }
-            st.session_state["saldos_override"].pop(cuenta_g, None)
+            # Restar de inmediato en la sesión visual
+            saldos_actuales[cuenta_g] -= monto_g
+            st.session_state["saldos_override"][cuenta_g] = saldos_actuales[cuenta_g]
+            
             with st.spinner("Guardando en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
                 time.sleep(1)
@@ -190,7 +193,9 @@ with tab_ingreso:
                 "descripcion": desc_i if desc_i else "Abono directo",
                 "monto": monto_i
             }
-            st.session_state["saldos_override"].pop(cuenta_i, None)
+            saldos_actuales[cuenta_i] += monto_i
+            st.session_state["saldos_override"][cuenta_i] = saldos_actuales[cuenta_i]
+            
             with st.spinner("Abonando en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
                 time.sleep(1)
@@ -213,13 +218,9 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 4: BILLETERAS, EDICIÓN Y TRANSFERENCIAS
+# ELEMENTO 4: BILLETERAS COMPACTAS
 # ==========================================
-col_w_title, col_w_btn = st.columns([2, 1])
-with col_w_title:
-    st.markdown("**Billeteras**")
-with col_w_btn:
-    abrir_modal = st.button("🔄 Transferir", use_container_width=True)
+st.markdown("**Billeteras**")
 
 b1, b2 = st.columns(2)
 with b1:
@@ -229,13 +230,17 @@ with b2:
     st.metric("Yape", f"S/. {saldos_actuales['Yape']:,.2f}")
     st.metric("Wardaditos", f"S/. {saldos_actuales['Wardaditos']:,.2f}")
 
-if abrir_modal:
-    with st.form("form_transf_modal"):
-        st.subheader("Mover / Transferir Saldo")
-        orig = st.selectbox("Billetera Origen", CUENTAS, index=0)
-        dest = st.selectbox("Billetera Destino", CUENTAS, index=1)
+# MÓDULO INTERACTIVO DE TRANSFERENCIA (ACCESIBLE Y PERSISTENTE)
+with st.expander("🔄 Mover / Transferir Saldo entre Billeteras"):
+    with st.form("form_transf_modal", clear_on_submit=True):
+        col_orig, col_dest = st.columns(2)
+        with col_orig:
+            orig = st.selectbox("Origen (Sale)", CUENTAS, index=0)
+        with col_dest:
+            dest = st.selectbox("Destino (Entra)", CUENTAS, index=1)
+            
         m_tr = st.number_input("Monto a Mover (S/.)", min_value=0.10, step=1.0, format="%.2f")
-        nota_tr = st.text_input("Nota / Concepto (opcional)")
+        nota_tr = st.text_input("Nota / Concepto (opcional)", placeholder="Pase para gastos, compras, etc.")
         
         btn_ejecutar_tr = st.form_submit_button("Confirmar Transferencia", use_container_width=True)
 
@@ -243,8 +248,15 @@ if abrir_modal:
             if orig == dest:
                 st.error("Origen y destino no pueden ser iguales.")
             elif m_tr > saldos_actuales[orig]:
-                st.error(f"Saldo insuficiente en {orig} (Disp: S/. {saldos_actuales[orig]:,.2f})")
+                st.error(f"Saldo insuficiente en {orig} (Disponible: S/. {saldos_actuales[orig]:,.2f})")
             else:
+                # 1. Ajustar saldos inmediatamente en la pantalla
+                saldos_actuales[orig] -= m_tr
+                saldos_actuales[dest] += m_tr
+                st.session_state["saldos_override"][orig] = saldos_actuales[orig]
+                st.session_state["saldos_override"][dest] = saldos_actuales[dest]
+
+                # 2. Registrar en Google Sheets
                 payload_tr = {
                     "accion": "TRANSFERENCIA",
                     "fechaHora": ahora_peru.strftime("%Y-%m-%d %H:%M:%S"),
@@ -253,15 +265,15 @@ if abrir_modal:
                     "monto": m_tr,
                     "nota": nota_tr
                 }
-                st.session_state["saldos_override"].pop(orig, None)
-                st.session_state["saldos_override"].pop(dest, None)
                 with st.spinner("Procesando transferencia..."):
                     requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
                     time.sleep(1)
+                st.success(f"¡Se movieron S/. {m_tr:,.2f} de {orig} a {dest}!")
                 st.rerun()
 
+# MÓDULO PARA EDITAR SALDOS BASE MANUALMENTE
 with st.expander("✏️ Editar Saldo Base de Billeteras"):
-    with st.form("form_editar_saldos"):
+    with st.form("form_editar_saldos", clear_on_submit=True):
         cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
         nuevo_saldo = st.number_input("Nuevo saldo actual (S/.)", min_value=0.0, step=10.0, format="%.2f")
         btn_guardar_saldo = st.form_submit_button("Actualizar Saldo en Sheets")
