@@ -21,6 +21,9 @@ CATEGORIAS = [
 
 CUENTAS = ["BCP", "Yape", "Efectivo", "Wardaditos"]
 
+# Zona horaria exacta de Perú (UTC-5)
+TZ_PERU = datetime.timezone(datetime.timedelta(hours=-5))
+
 st.markdown("""
 <style>
     .block-container {
@@ -65,32 +68,34 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. CARGA DIRECTA DESDE GOOGLE SHEETS
+# 1. CARGA DIRECTA Y LECTURA DEL TOTAL DE HOY
 def cargar_datos_sheets():
     try:
         url_fresca = f"{APPS_SCRIPT_URL}?t={int(time.time() * 1000)}"
         r = requests.get(url_fresca, timeout=8)
         if r.status_code == 200:
             res = r.json()
-            return res.get("movimientos", []), res.get("saldosBase", {c: 0.0 for c in CUENTAS})
+            return (
+                res.get("movimientos", []), 
+                res.get("saldosBase", {c: 0.0 for c in CUENTAS}),
+                float(res.get("gastoHoy", 0.0))
+            )
     except Exception as e:
         st.error(f"Error de conexión con Sheets: {e}")
-    return [], {c: 0.0 for c in CUENTAS}
+    return [], {c: 0.0 for c in CUENTAS}, 0.0
 
-movimientos, saldos_base = cargar_datos_sheets()
+movimientos, saldos_base, gasto_hoy_servidor = cargar_datos_sheets()
 
-# Sobrescribir en sesión si hubo un ajuste manual reciente
 if "saldos_override" not in st.session_state:
     st.session_state["saldos_override"] = {}
 
-# 2. CÁLCULO DE SALDOS
+# 2. CÁLCULO DE SALDOS EN VIVO
 saldos_actuales = dict(saldos_base)
 
 for c in CUENTAS:
     if c in st.session_state["saldos_override"]:
         saldos_actuales[c] = st.session_state["saldos_override"][c]
     else:
-        # Si no fue ajustado manualmente en esta sesión, calcular con los movimientos
         delta = 0.0
         for m in movimientos:
             cta = str(m.get("cuenta", "")).strip()
@@ -120,6 +125,8 @@ st.markdown(f"""
 # ==========================================
 tab_gasto, tab_ingreso = st.tabs(["➕ REGISTRAR GASTO", "💵 REGISTRAR INGRESO"])
 
+ahora_peru = datetime.datetime.now(TZ_PERU)
+
 with tab_gasto:
     with st.form("form_gasto", clear_on_submit=True):
         col_m, col_cta = st.columns(2)
@@ -133,9 +140,9 @@ with tab_gasto:
 
         col_f, col_h = st.columns(2)
         with col_f:
-            f_g = st.date_input("Fecha", datetime.date.today(), key="f_gasto")
+            f_g = st.date_input("Fecha", ahora_peru.date(), key="f_gasto")
         with col_h:
-            h_g = st.time_input("Hora", datetime.datetime.now().time(), key="h_gasto")
+            h_g = st.time_input("Hora", ahora_peru.time(), key="h_gasto")
 
         btn_gasto = st.form_submit_button("💳 Registrar Gasto", use_container_width=True)
 
@@ -149,7 +156,6 @@ with tab_gasto:
                 "descripcion": desc_g if desc_g else cat_g,
                 "monto": monto_g
             }
-            # Limpiar override para que recalcule con el nuevo gasto
             st.session_state["saldos_override"].pop(cuenta_g, None)
             with st.spinner("Guardando en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
@@ -164,13 +170,13 @@ with tab_ingreso:
         with col_ctai:
             cuenta_i = st.selectbox("Cuenta de Entrada", options=CUENTAS, index=0)
 
-        desc_i = st.text_input("Concepto de Ingreso", placeholder="Sueldo, abono, venta, etc.")
+        desc_i = st.text_input("Concepto de Ingreso", placeholder="Sueldo, abono, etc.")
 
         col_fi, col_hi = st.columns(2)
         with col_fi:
-            f_i = st.date_input("Fecha", datetime.date.today(), key="f_ingreso")
+            f_i = st.date_input("Fecha", ahora_peru.date(), key="f_ingreso")
         with col_hi:
-            h_i = st.time_input("Hora", datetime.datetime.now().time(), key="h_ingreso")
+            h_i = st.time_input("Hora", ahora_peru.time(), key="h_ingreso")
 
         btn_ingreso = st.form_submit_button("💰 Abonar Ingreso", use_container_width=True)
 
@@ -191,45 +197,16 @@ with tab_ingreso:
             st.rerun()
 
 # ==========================================
-# ELEMENTO 3: GASTO ACUMULADO HOY HASTA EL MOMENTO
+# ELEMENTO 3: SUMATORIA REAL DE HOY (00:00 A 24:00)
 # ==========================================
-def parsear_fecha_flexible(val_str):
-    s = str(val_str).strip()
-    if not s or s.upper() in ["NONE", "NAN"]:
-        return None
-    s = s.replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
-        try:
-            return datetime.datetime.strptime(s[:len(fmt)], fmt).date()
-        except:
-            pass
-    partes = s[:10].replace("-", "/").split("/")
-    if len(partes) == 3:
-        try:
-            if len(partes[0]) == 4:
-                return datetime.date(int(partes[0]), int(partes[1]), int(partes[2]))
-            elif len(partes[2]) == 4:
-                return datetime.date(int(partes[2]), int(partes[1]), int(partes[0]))
-        except:
-            pass
-    return None
-
-hoy = datetime.date.today()
-ahora_hora = datetime.datetime.now().strftime("%H:%M")
-
-gasto_hoy_acumulado = 0.0
-for m in movimientos:
-    if str(m.get("tipo", "")).strip().lower() == "gasto":
-        f_mov = parsear_fecha_flexible(m.get("fechaHora"))
-        if f_mov == hoy:
-            gasto_hoy_acumulado += float(m.get("monto", 0))
+hora_actual_str = ahora_peru.strftime("%H:%M")
 
 st.markdown(f"""
 <div class="metric-hoy">
     <div>
         <div style="font-size:0.75rem; font-weight:700; color:#C2410C;">HOY HAS GASTADO</div>
-        <div style="font-size:1.75rem; font-weight:800; color:#7C2D12;">S/. {gasto_hoy_acumulado:,.2f}</div>
-        <div style="font-size:0.68rem; color:#9A3412;">Gasto acumulado hasta el momento ({ahora_hora} hrs)</div>
+        <div style="font-size:1.85rem; font-weight:800; color:#7C2D12;">S/. {gasto_hoy_servidor:,.2f}</div>
+        <div style="font-size:0.68rem; color:#9A3412;">Gasto acumulado hasta las {hora_actual_str} hrs (00:00 a 24:00)</div>
     </div>
     <div style="font-size:1.8rem;">📉</div>
 </div>
@@ -270,7 +247,7 @@ if abrir_modal:
             else:
                 payload_tr = {
                     "accion": "TRANSFERENCIA",
-                    "fechaHora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "fechaHora": ahora_peru.strftime("%Y-%m-%d %H:%M:%S"),
                     "cuentaOrigen": orig,
                     "cuentaDestino": dest,
                     "monto": m_tr,
@@ -283,7 +260,6 @@ if abrir_modal:
                     time.sleep(1)
                 st.rerun()
 
-# MÓDULO PARA EDITAR SALDO
 with st.expander("✏️ Editar Saldo Base de Billeteras"):
     with st.form("form_editar_saldos"):
         cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
@@ -291,10 +267,7 @@ with st.expander("✏️ Editar Saldo Base de Billeteras"):
         btn_guardar_saldo = st.form_submit_button("Actualizar Saldo en Sheets")
         
         if btn_guardar_saldo:
-            # 1. Guardar inmediatamente en la sesión de la app
             st.session_state["saldos_override"][cta_edit] = float(nuevo_saldo)
-            
-            # 2. Enviar a Google Sheets
             payload_ed = {
                 "accion": "EDITAR_SALDO_BASE",
                 "cuenta": cta_edit,
