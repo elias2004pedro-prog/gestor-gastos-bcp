@@ -21,7 +21,7 @@ CATEGORIAS = [
 
 CUENTAS = ["BCP", "Yape", "Efectivo", "Wardaditos"]
 
-# Zona horaria exacta de Perú (UTC-5)
+# Zona horaria oficial de Perú (UTC-5)
 TZ_PERU = datetime.timezone(datetime.timedelta(hours=-5))
 
 st.markdown("""
@@ -121,7 +121,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# ELEMENTO 2: FORMULARIO PRINCIPAL (SIN SELECTORES DE FECHA/HORA)
+# ELEMENTO 2: FORMULARIO PRINCIPAL
 # ==========================================
 tab_gasto, tab_ingreso = st.tabs(["➕ REGISTRAR GASTO", "💵 REGISTRAR INGRESO"])
 
@@ -141,7 +141,6 @@ with tab_gasto:
         btn_gasto = st.form_submit_button("💳 Registrar Gasto", use_container_width=True)
 
         if btn_gasto:
-            # Captura automática de fecha y hora local de Perú para Google Sheets
             f_str = datetime.datetime.now(TZ_PERU).strftime("%Y-%m-%d %H:%M:%S")
             payload = {
                 "accion": "REGISTRAR_GASTO",
@@ -172,7 +171,6 @@ with tab_ingreso:
         btn_ingreso = st.form_submit_button("💰 Abonar Ingreso", use_container_width=True)
 
         if btn_ingreso:
-            # Captura automática de fecha y hora local de Perú para Google Sheets
             f_str_i = datetime.datetime.now(TZ_PERU).strftime("%Y-%m-%d %H:%M:%S")
             payload = {
                 "accion": "REGISTRAR_INGRESO",
@@ -259,7 +257,7 @@ with st.expander("🔄 Mover / Transferir Saldo entre Billeteras"):
                 st.rerun()
 
 # MÓDULO PARA EDITAR SALDOS BASE MANUALMENTE
-with st.expander("✏️ Editar Saldo Base de Billeteras"):
+with st.expander("✏️️ Editar Saldo Base de Billeteras"):
     with st.form("form_editar_saldos", clear_on_submit=True):
         cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
         nuevo_saldo = st.number_input("Nuevo saldo actual (S/.)", min_value=0.0, step=10.0, format="%.2f")
@@ -279,11 +277,13 @@ with st.expander("✏️ Editar Saldo Base de Billeteras"):
             st.rerun()
 
 # ==========================================
-# HISTORIAL COMPLETO
+# HISTORIAL COMPLETO (FECHAHORA OCULTA EN LA APP)
 # ==========================================
 with st.expander("📋 Historial de Movimientos"):
     if movimientos:
         df_hist = pd.DataFrame(movimientos)
-        st.dataframe(df_hist.iloc[::-1], use_container_width=True, hide_index=True)
+        # Ocultar fechaHora y mostrar solo las columnas clave en la app
+        columnas_mostrar = [c for c in ["tipo", "cuenta", "categoria", "descripcion", "monto"] if c in df_hist.columns]
+        st.dataframe(df_hist[columnas_mostrar].iloc[::-1], use_container_width=True, hide_index=True)
     else:
         st.caption("No hay movimientos registrados.")
