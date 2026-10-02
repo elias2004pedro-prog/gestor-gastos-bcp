@@ -65,32 +65,43 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. OBTENCIÓN EN TIEMPO REAL SIN CACHÉ CONGELADO
+# 1. CARGA DIRECTA DESDE GOOGLE SHEETS
 def cargar_datos_sheets():
     try:
-        # Parámetro anti-caché con timestamp
-        url_fresca = f"{APPS_SCRIPT_URL}?t={int(time.time())}"
+        url_fresca = f"{APPS_SCRIPT_URL}?t={int(time.time() * 1000)}"
         r = requests.get(url_fresca, timeout=8)
         if r.status_code == 200:
             res = r.json()
             return res.get("movimientos", []), res.get("saldosBase", {c: 0.0 for c in CUENTAS})
     except Exception as e:
         st.error(f"Error de conexión con Sheets: {e}")
-    return [], {"BCP": 1250.0, "Yape": 340.5, "Efectivo": 180.0, "Wardaditos": 500.0}
+    return [], {c: 0.0 for c in CUENTAS}
 
 movimientos, saldos_base = cargar_datos_sheets()
 
-# 2. CÁLCULO DE SALDOS ACTUALES
+# Sobrescribir en sesión si hubo un ajuste manual reciente
+if "saldos_override" not in st.session_state:
+    st.session_state["saldos_override"] = {}
+
+# 2. CÁLCULO DE SALDOS
 saldos_actuales = dict(saldos_base)
-for m in movimientos:
-    monto = float(m.get("monto", 0))
-    cta = m.get("cuenta")
-    tipo = m.get("tipo")
-    if cta in saldos_actuales:
-        if tipo in ["Gasto", "Transferencia Salida"]:
-            saldos_actuales[cta] -= monto
-        elif tipo in ["Ingreso", "Transferencia Entrada"]:
-            saldos_actuales[cta] += monto
+
+for c in CUENTAS:
+    if c in st.session_state["saldos_override"]:
+        saldos_actuales[c] = st.session_state["saldos_override"][c]
+    else:
+        # Si no fue ajustado manualmente en esta sesión, calcular con los movimientos
+        delta = 0.0
+        for m in movimientos:
+            cta = str(m.get("cuenta", "")).strip()
+            if cta == c:
+                monto = float(m.get("monto", 0))
+                tipo = str(m.get("tipo", "")).strip()
+                if tipo in ["Gasto", "Transferencia Salida"]:
+                    delta -= monto
+                elif tipo in ["Ingreso", "Transferencia Entrada"]:
+                    delta += monto
+        saldos_actuales[c] = saldos_base.get(c, 0.0) + delta
 
 total_general = sum(saldos_actuales.values())
 
@@ -138,9 +149,11 @@ with tab_gasto:
                 "descripcion": desc_g if desc_g else cat_g,
                 "monto": monto_g
             }
+            # Limpiar override para que recalcule con el nuevo gasto
+            st.session_state["saldos_override"].pop(cuenta_g, None)
             with st.spinner("Guardando en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
-                time.sleep(1) # Tiempo de sincronización para que Sheets asiente la fila
+                time.sleep(1)
             st.rerun()
 
 with tab_ingreso:
@@ -171,16 +184,16 @@ with tab_ingreso:
                 "descripcion": desc_i if desc_i else "Abono directo",
                 "monto": monto_i
             }
+            st.session_state["saldos_override"].pop(cuenta_i, None)
             with st.spinner("Abonando en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
                 time.sleep(1)
             st.rerun()
 
 # ==========================================
-# ELEMENTO 3: GASTO ACUMULADO HASTA EL MOMENTO (HOY)
+# ELEMENTO 3: GASTO ACUMULADO HOY HASTA EL MOMENTO
 # ==========================================
 def parsear_fecha_flexible(val_str):
-    """Interpreta cualquier formato de fecha que exporte Google Sheets."""
     s = str(val_str).strip()
     if not s or s.upper() in ["NONE", "NAN"]:
         return None
@@ -190,7 +203,6 @@ def parsear_fecha_flexible(val_str):
             return datetime.datetime.strptime(s[:len(fmt)], fmt).date()
         except:
             pass
-    # Intento de extracción por componentes
     partes = s[:10].replace("-", "/").split("/")
     if len(partes) == 3:
         try:
@@ -205,7 +217,6 @@ def parsear_fecha_flexible(val_str):
 hoy = datetime.date.today()
 ahora_hora = datetime.datetime.now().strftime("%H:%M")
 
-# Sumatoria estricta de todos los gastos registrados correspondientes al día de hoy
 gasto_hoy_acumulado = 0.0
 for m in movimientos:
     if str(m.get("tipo", "")).strip().lower() == "gasto":
@@ -265,26 +276,34 @@ if abrir_modal:
                     "monto": m_tr,
                     "nota": nota_tr
                 }
+                st.session_state["saldos_override"].pop(orig, None)
+                st.session_state["saldos_override"].pop(dest, None)
                 with st.spinner("Procesando transferencia..."):
                     requests.post(APPS_SCRIPT_URL, json=payload_tr, timeout=8)
                     time.sleep(1)
                 st.rerun()
 
+# MÓDULO PARA EDITAR SALDO
 with st.expander("✏️ Editar Saldo Base de Billeteras"):
     with st.form("form_editar_saldos"):
         cta_edit = st.selectbox("Selecciona billetera a ajustar:", CUENTAS)
-        nuevo_saldo = st.number_input("Nuevo saldo inicial base (S/.)", min_value=0.0, step=10.0, format="%.2f")
+        nuevo_saldo = st.number_input("Nuevo saldo actual (S/.)", min_value=0.0, step=10.0, format="%.2f")
         btn_guardar_saldo = st.form_submit_button("Actualizar Saldo en Sheets")
         
         if btn_guardar_saldo:
+            # 1. Guardar inmediatamente en la sesión de la app
+            st.session_state["saldos_override"][cta_edit] = float(nuevo_saldo)
+            
+            # 2. Enviar a Google Sheets
             payload_ed = {
                 "accion": "EDITAR_SALDO_BASE",
                 "cuenta": cta_edit,
                 "nuevoSaldo": nuevo_saldo
             }
-            with st.spinner("Actualizando saldo base..."):
+            with st.spinner("Actualizando saldo en Sheets..."):
                 requests.post(APPS_SCRIPT_URL, json=payload_ed, timeout=8)
                 time.sleep(1)
+            st.success(f"¡{cta_edit} actualizado a S/. {nuevo_saldo:,.2f}!")
             st.rerun()
 
 # ==========================================
